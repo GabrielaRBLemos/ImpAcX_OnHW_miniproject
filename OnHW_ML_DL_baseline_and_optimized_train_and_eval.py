@@ -124,15 +124,8 @@ def ts_extract_feautures(train_X, train_y, test_X):
     df_test_X = X_npy_to_df(test_X)
     
     # ==== Forcing into numeric
-    df_train_X = df_train_X.astype({'id': 'int64', 'time': 'int64', **{col: 'float64' for col in df_train_X.columns if col.startswith('f_')}})# ==== Forcing into numeric
+    df_train_X = df_train_X.astype({'id': 'int64', 'time': 'int64', **{col: 'float64' for col in df_train_X.columns if col.startswith('f_')}})
     df_test_X = df_test_X.astype({'id': 'int64', 'time': 'int64', **{col: 'float64' for col in df_train_X.columns if col.startswith('f_')}})
-    
-    #==== Teste
-    print(df_train_X.dtypes)
-    #print(df_train_X.head())
-    #print("non-numeric:")
-    print(df_train_X.select_dtypes(exclude=['number']).columns.tolist())
-    #==== Teste FIM
 
     extracted_features = extract_features(df_train_X, column_id='id', column_sort="time")
     
