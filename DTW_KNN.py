@@ -24,7 +24,7 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classifica
 from sklearn.preprocessing import MinMaxScaler, QuantileTransformer, RobustScaler
 from sklearn import svm
 from tslearn.metrics import soft_dtw
-i=0
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def fit_SVM(kernel:str, X, Y):
     if kernel=="DTW":
@@ -538,32 +538,53 @@ def knn_from_neighbors(neighbors:list, labels:np.array, num_neighbors:int):
     return matches
 
 
-def all_neighbors(train:np.array, train_labels:np.array, test:np.array, distance_metric:int,amt_neighbors = -1,save = False,path = None):
+def _compute_row_neighbors(args):
+    """Worker: compute neighbors for a single test row."""
+    row_idx, row, train, train_labels, distance_metric, amt_neighbors, save, path = args
+    if save and os.path.exists(path + "/" + str(row_idx) + ".csv"):
+        return row_idx, None  # already on disk, skip
+    neighbors = get_neighbors(train, train_labels, row, distance_metric)
+    trimmed = neighbors[0:amt_neighbors]
+    if save:
+        neighbor_to_csv(row_idx, trimmed, path)
+    return row_idx, trimmed
+
+
+def all_neighbors(train:np.array, train_labels:np.array, test:np.array, distance_metric:int,
+                  amt_neighbors=-1, save=False, path=None, max_workers=None):
     """returns distances between each element in test and each element in train
 
     Args:
-        train (np.array): training 
+        train (np.array): training
         train_labels (np.array): training labels
         test (np.array): testing data
         distance_metric (int): which distance metric is used for distances
+        amt_neighbors (int): how many neighbors to keep (-1 = all)
+        save (bool): save per-row CSVs to disk
+        path (str): directory for saved CSVs
+        max_workers (int): number of parallel workers (None = cpu_count)
 
     Returns:
         list: list of all distances and labels
     """
     if save and (not os.path.exists(path)):
         create_file(path)
-    i = -1
-    all_neighbors = list()
-    for row in test:
-        i = i+1
-        if save and os.path.exists(path+"/"+str(i)+".csv"):
-            continue
-        neighbors = get_neighbors(
-            train, train_labels, row, distance_metric)
-        all_neighbors.append(neighbors[0:amt_neighbors])
-        if save:
-            neighbor_to_csv(i,neighbors[0:amt_neighbors],path)
-    return all_neighbors
+
+    args_list = [
+        (i, row, train, train_labels, distance_metric, amt_neighbors, save, path)
+        for i, row in enumerate(test)
+    ]
+
+    results = {}
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_compute_row_neighbors, args): args[0] for args in args_list}
+        for future in as_completed(futures):
+            row_idx, trimmed = future.result()
+            if trimmed is not None:
+                results[row_idx] = trimmed
+
+    # Return in original test order, skipping rows already on disk (trimmed=None)
+    return [results[i] for i in sorted(results)]
 
 
 def neighbors_to_csv(neighbors:list, path:str):

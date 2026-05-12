@@ -6,6 +6,7 @@ from utils import folders_and_files
 import os
 import pandas as pd
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from tsfresh import extract_features, select_features
 from tsfresh.utilities.dataframe_functions import impute
@@ -55,23 +56,53 @@ def X_npy_to_df(X):
 
     return df.reset_index(drop=True)
 
-def ts_extract_feautures(train_X, train_y, test_X, nsig):                                                                                                 
+def ts_extract_feautures(train_X, train_y, test_X, nsig, n_jobs=1):
     df_train_X = X_npy_to_df(train_X)
     df_test_X = X_npy_to_df(test_X)
 
-    extracted_features = extract_features(df_train_X, column_id='id', column_sort="time")
+    extracted_features = extract_features(df_train_X, column_id='id', column_sort="time", n_jobs=n_jobs)
     # remove all NaN values
     impute(extracted_features)
-    features_filtered_train = select_features(extracted_features, train_y, multiclass=True, n_significant=nsig)                           
+    features_filtered_train = select_features(extracted_features, train_y, multiclass=True, n_significant=nsig)
 
     features_filtered_test = extract_features(df_test_X, column_id='id', column_sort="time",
-                                               kind_to_fc_parameters=settings.from_columns(features_filtered_train.columns))
+                                               kind_to_fc_parameters=settings.from_columns(features_filtered_train.columns),
+                                               n_jobs=n_jobs)
 
     features_filtered_test = features_filtered_test[features_filtered_train.columns]
     # remove all NaN values
     impute(features_filtered_test)
 
     return extracted_features, features_filtered_train, features_filtered_test
+
+
+def _extract_one_combination(args):
+    """Worker function: process one (case, dependency, fold, nsig) combination."""
+    case, dependency, k_fold_number, nsig = args
+    print(f"Processing dataset:{case}_{dependency}_{k_fold_number}_nsig{nsig}")
+
+    path_to_models_and_data = os.path.join(options.BASE_OUTPUT, options.ML_MODELS_AND_DATA)
+    folder_name = f"{case}_{dependency}_{k_fold_number}_nsig{nsig}"
+    folders_and_files.make_folder_at(path_to_models_and_data, folder_name)
+
+    train_X, train_y, test_X, test_y = load_OnHW_data(case, dependency, k_fold_number)
+    train_X_filtered, train_y_filtered = filter_train_test(train_X, train_y, case)
+    test_X_filtered, test_y_filtered = filter_train_test(test_X, test_y, case)
+
+    # n_jobs=1 to avoid nested multiprocessing
+    extracted_features, features_filtered_train, features_filtered_test = ts_extract_feautures(
+        train_X_filtered, train_y_filtered, test_X_filtered, nsig, n_jobs=1)
+
+    out_folder = os.path.join(options.BASE_OUTPUT, options.ML_MODELS_AND_DATA, folder_name)
+    np.save(os.path.join(out_folder, 'train_X_filtered.npy'), train_X_filtered)
+    np.save(os.path.join(out_folder, 'train_y_filtered.npy'), train_y_filtered)
+    np.save(os.path.join(out_folder, 'test_X_filtered.npy'), test_X_filtered)
+    np.save(os.path.join(out_folder, 'test_y_filtered.npy'), test_y_filtered)
+    features_filtered_train.to_csv(os.path.join(out_folder, 'features_filtered_train.csv'), index=False)
+    features_filtered_test.to_csv(os.path.join(out_folder, 'features_filtered_test.csv'), index=False)
+
+    return f"Done: {case}_{dependency}_{k_fold_number}_nsig{nsig}"
+
 
 '''For each train and test OnHW data, the data is filtered and
 statistical features are extracted using tsfresh. Corresponding outputs are stored under the 'output' folder.
@@ -87,7 +118,7 @@ dataset/
         │   └── y_train.npy
         ├── onhw2_both_dep_1
         ├── ...
-        ├── ...        
+        ├── ...
         ├── onhw2_upper_indep_4
         │   ├── X_test.npy
         │   ├── X_train.npy
@@ -95,43 +126,25 @@ dataset/
         │   └── y_train.npy
         └── readme.txt
 '''
-def OnHW_ML_filter_and_extract():
+def OnHW_ML_filter_and_extract(max_workers=None):
     folders_and_files.make_folder_at(options.BASE_OUTPUT, options.ML_MODELS_AND_DATA)
-    path_to_models_and_data = os.path.join(options.BASE_OUTPUT, options.ML_MODELS_AND_DATA)
-    for case in options.OnHW_CASE:
-        for dependency in options.OnHW_DEPENDENCY:
-            for k_fold_number in options.OnHW_FOLD:                                                                                                  
-                for nsig in options.NSIG_LIST:
-                    print(f"Processing dataset:{case}_{dependency}_{k_fold_number}_nsig{nsig}")                                                                    
-                    folder_name = f"{case}_{dependency}_{k_fold_number}_nsig{nsig}"                                                                                
-                    folders_and_files.make_folder_at(path_to_models_and_data, folder_name)
 
-                    train_X, train_y, test_X, test_y = load_OnHW_data(case, dependency, k_fold_number)
-                    train_X_filtered, train_y_filtered = filter_train_test(train_X, train_y, case)
-                    test_X_filtered, test_y_filtered = filter_train_test(test_X, test_y, case)
+    combinations = [
+        (case, dependency, k_fold_number, nsig)
+        for case in options.OnHW_CASE
+        for dependency in options.OnHW_DEPENDENCY
+        for k_fold_number in options.OnHW_FOLD
+        for nsig in options.NSIG_LIST
+    ]
 
-                    extracted_features, features_filtered_train, features_filtered_test = ts_extract_feautures(
-                        train_X_filtered, train_y_filtered, test_X_filtered, nsig)
-
-                    path_to_models_and_data = os.path.join(options.BASE_OUTPUT, options.ML_MODELS_AND_DATA)                                               
-                    folder_name = f"{case}_{dependency}_{k_fold_number}_nsig{nsig}"                                                                                
-                    folders_and_files.make_folder_at(path_to_models_and_data, folder_name)
-
-                    np.save(os.path.join(path_to_models_and_data, folder_name, 'train_X_filtered.npy'), train_X_filtered)
-                    np.save(os.path.join(path_to_models_and_data, folder_name, 'train_y_filtered.npy'), train_y_filtered)
-                    np.save(os.path.join(path_to_models_and_data, folder_name, 'test_X_filtered.npy'), test_X_filtered)
-                    np.save(os.path.join(path_to_models_and_data, folder_name, 'test_y_filtered.npy'), test_y_filtered)
-                    features_filtered_train.to_csv(
-                        os.path.join(path_to_models_and_data, folder_name, 'features_filtered_train.csv'), index=False)
-                    features_filtered_test.to_csv(
-                        os.path.join(path_to_models_and_data, folder_name, 'features_filtered_test.csv'), index=False)
-
-
-
-
-
-
-
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_extract_one_combination, args): args for args in combinations}
+        for future in as_completed(futures):
+            try:
+                print(future.result())
+            except Exception as e:
+                args = futures[future]
+                print(f"ERROR in {args}: {e}")
 
 
 if __name__ == "__main__":
